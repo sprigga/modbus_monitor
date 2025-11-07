@@ -1,0 +1,34 @@
+[modbus]
+# Modbus TCP Connection Configuration
+host = 192.168.30.24
+port = 502
+device_id = 1
+
+[polling]
+# Polling and Timeout Settings
+poll_interval = 2.0
+timeout = 3.0
+retries = 3
+
+[registers]
+# Register Range Configuration
+start_address = 1
+end_address = 26
+
+[logging]
+# Logging Level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+level = INFO
+
+# Optional: Additional Register Ranges
+# Uncomment and configure as needed
+# [input_registers]
+# start = 100
+# count = 8
+
+# [coils]
+# start = 0
+# count = 16
+
+# [discrete_inputs]
+# start = 100
+# count = 8

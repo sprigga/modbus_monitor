@@ -1,0 +1,8 @@
+# Modbus TCP communication library
+pymodbus>=3.0.0
+
+# Async support
+asyncio
+
+# Configuration management (optional but recommended for .env file support)
+python-dotenv>=1.0.0

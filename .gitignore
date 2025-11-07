@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+
+# IDEs
+.vscode/
+
+# Backups
+*.backup
+*.old

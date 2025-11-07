@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Async Modbus Data Monitor
-Continuously monitors Modbus data using async client with configurable polling intervals.
+Modbus Service Module
+Integrates async_modbus_monitor.py functionality with Redis storage
 """
 
 import asyncio
 import logging
+import json
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
+import redis.asyncio as redis
 
 from pymodbus.client import AsyncModbusTcpClient
 from pymodbus.exceptions import ModbusException
@@ -34,11 +36,12 @@ class RegisterConfig:
     name: str = None
 
 
-class AsyncModbusMonitor:
-    """Asynchronous Modbus data monitor"""
+class ModbusService:
+    """Enhanced Modbus service with Redis integration"""
     
-    def __init__(self, config: ModbusConfig):
+    def __init__(self, config: ModbusConfig, redis_client: redis.Redis):
         self.config = config
+        self.redis_client = redis_client
         self.client: Optional[AsyncModbusTcpClient] = None
         self.running = False
         self.logger = logging.getLogger(__name__)
@@ -84,92 +87,66 @@ class AsyncModbusMonitor:
             self.client.close()
             self.logger.info("Disconnected from Modbus device")
     
-    async def read_register(self, reg_config: RegisterConfig) -> Optional[Dict[str, Any]]:
-        """Read a single register configuration"""
+    def is_connected(self) -> bool:
+        """Check if connected to Modbus device"""
+        return self.client is not None and self.client.connected
+    
+    async def read_registers(self, address: int, count: int = 1, 
+                           register_type: str = 'holding') -> Optional[Dict[str, Any]]:
+        """Read registers and return formatted data"""
         if not self.client or not self.client.connected:
             return None
             
         try:
-            if reg_config.register_type == 'holding':
+            if register_type == 'holding':
                 result = await self.client.read_holding_registers(
-                    reg_config.address,
-                    count=reg_config.count,
-                    device_id=self.config.device_id
+                    address, count=count, device_id=self.config.device_id
                 )
                 values = result.registers if not result.isError() else None
                 
-            elif reg_config.register_type == 'input':
+            elif register_type == 'input':
                 result = await self.client.read_input_registers(
-                    reg_config.address,
-                    count=reg_config.count,
-                    device_id=self.config.device_id
+                    address, count=count, device_id=self.config.device_id
                 )
                 values = result.registers if not result.isError() else None
                 
-            elif reg_config.register_type == 'coils':
+            elif register_type == 'coils':
                 result = await self.client.read_coils(
-                    reg_config.address,
-                    count=reg_config.count,
-                    device_id=self.config.device_id
+                    address, count=count, device_id=self.config.device_id
                 )
                 values = result.bits if not result.isError() else None
                 
-            elif reg_config.register_type == 'discrete_inputs':
+            elif register_type == 'discrete_inputs':
                 result = await self.client.read_discrete_inputs(
-                    reg_config.address,
-                    count=reg_config.count,
-                    device_id=self.config.device_id
+                    address, count=count, device_id=self.config.device_id
                 )
                 values = result.bits if not result.isError() else None
                 
             else:
-                self.logger.error(f"Unknown register type: {reg_config.register_type}")
+                self.logger.error(f"Unknown register type: {register_type}")
                 return None
             
             if values is not None:
                 return {
-                    'name': reg_config.name,
-                    'address': reg_config.address,
-                    'type': reg_config.register_type,
-                    'values': values[:reg_config.count] if isinstance(values, list) else [values],
+                    'address': address,
+                    'type': register_type,
+                    'count': count,
+                    'values': values[:count] if isinstance(values, list) else [values],
                     'timestamp': datetime.now().isoformat()
                 }
             else:
-                self.logger.error(f"Error reading {reg_config.name}: {result}")
+                self.logger.error(f"Error reading registers at address {address}: {result}")
                 return None
                 
         except ModbusException as exc:
-            self.logger.error(f"Modbus exception reading {reg_config.name}: {exc}")
+            self.logger.error(f"Modbus exception reading address {address}: {exc}")
             return None
         except Exception as e:
-            self.logger.error(f"Unexpected error reading {reg_config.name}: {e}")
+            self.logger.error(f"Unexpected error reading address {address}: {e}")
             return None
-    
-    async def read_all_registers(self) -> List[Dict[str, Any]]:
-        """Read all configured registers"""
-        tasks = [self.read_register(reg) for reg in self.registers_to_monitor]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        valid_results = []
-        for result in results:
-            if isinstance(result, dict):
-                valid_results.append(result)
-            elif isinstance(result, Exception):
-                self.logger.error(f"Task failed with exception: {result}")
-
-        return valid_results
-
-    async def write_holding_register(self, address: int, value: int) -> bool:
-        """
-        Write a single holding register
-
-        Args:
-            address: Register address to write to
-            value: Value to write (0-65535 for single register)
-
-        Returns:
-            True if write successful, False otherwise
-        """
+    async def write_single_register(self, address: int, value: int) -> bool:
+        """Write a single holding register"""
         if not self.client or not self.client.connected:
             self.logger.error("Not connected to Modbus device")
             return False
@@ -182,7 +159,7 @@ class AsyncModbusMonitor:
             )
 
             if not result.isError():
-                self.logger.info(f"Successfully wrote value {value} (0x{value:04X}) to address {address} (0x{address:04X})")
+                self.logger.info(f"Successfully wrote value {value} to address {address}")
                 return True
             else:
                 self.logger.error(f"Error writing to address {address}: {result}")
@@ -195,17 +172,8 @@ class AsyncModbusMonitor:
             self.logger.error(f"Unexpected error writing to address {address}: {e}")
             return False
 
-    async def write_holding_registers(self, address: int, values: List[int]) -> bool:
-        """
-        Write multiple holding registers
-
-        Args:
-            address: Starting register address
-            values: List of values to write
-
-        Returns:
-            True if write successful, False otherwise
-        """
+    async def write_multiple_registers(self, address: int, values: List[int]) -> bool:
+        """Write multiple holding registers"""
         if not self.client or not self.client.connected:
             self.logger.error("Not connected to Modbus device")
             return False
@@ -218,9 +186,7 @@ class AsyncModbusMonitor:
             )
 
             if not result.isError():
-                values_str = ', '.join([f"{v} (0x{v:04X})" for v in values])
-                self.logger.info(f"Successfully wrote {len(values)} registers starting at address {address} (0x{address:04X})")
-                self.logger.info(f"Values: [{values_str}]")
+                self.logger.info(f"Successfully wrote {len(values)} registers starting at address {address}")
                 return True
             else:
                 self.logger.error(f"Error writing to address {address}: {result}")
@@ -232,9 +198,52 @@ class AsyncModbusMonitor:
         except Exception as e:
             self.logger.error(f"Unexpected error writing to address {address}: {e}")
             return False
-    
-    async def monitor_continuously(self, data_callback=None):
-        """Continuously monitor Modbus data"""
+
+    async def store_data_to_redis(self, data: List[Dict[str, Any]]):
+        """Store data to Redis"""
+        try:
+            # Store latest data
+            latest_data = {
+                'data': data,
+                'timestamp': datetime.now().isoformat()
+            }
+            await self.redis_client.set("modbus:latest", json.dumps(latest_data))
+            
+            # Store to history (sorted set with timestamp as score)
+            timestamp = datetime.now().timestamp()
+            await self.redis_client.zadd(
+                "modbus:history", 
+                {json.dumps(latest_data): timestamp}
+            )
+            
+            # Keep only last 1000 entries in history
+            await self.redis_client.zremrangebyrank("modbus:history", 0, -1001)
+            
+        except Exception as e:
+            self.logger.error(f"Error storing data to Redis: {e}")
+
+    async def read_all_registers(self) -> List[Dict[str, Any]]:
+        """Read all configured registers"""
+        tasks = []
+        for reg in self.registers_to_monitor:
+            task = self.read_registers(reg.address, reg.count, reg.register_type)
+            tasks.append(task)
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        valid_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, dict):
+                # Add register name
+                result['name'] = self.registers_to_monitor[i].name
+                valid_results.append(result)
+            elif isinstance(result, Exception):
+                self.logger.error(f"Task failed with exception: {result}")
+
+        return valid_results
+
+    async def start_monitoring(self):
+        """Start continuous monitoring and store data to Redis"""
         self.running = True
         consecutive_errors = 0
         max_consecutive_errors = 5
@@ -257,10 +266,9 @@ class AsyncModbusMonitor:
                 
                 if data:
                     consecutive_errors = 0
-                    if data_callback:
-                        await data_callback(data)
-                    else:
-                        self.log_data(data)
+                    # Store data to Redis
+                    await self.store_data_to_redis(data)
+                    self.logger.debug(f"Stored {len(data)} register readings to Redis")
                 else:
                     consecutive_errors += 1
                     self.logger.warning(f"No data received (consecutive errors: {consecutive_errors})")
@@ -283,95 +291,7 @@ class AsyncModbusMonitor:
                 await asyncio.sleep(self.config.poll_interval)
         
         self.running = False
-        await self.disconnect()
-    
-    def log_data(self, data: List[Dict[str, Any]]):
-        """Log data to console (default callback)"""
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-        print(f"\n=== Modbus Data ({timestamp}) ===")
-        for item in data:
-            values_str = ', '.join(str(v) for v in item['values'])
-            print(f"  {item['name']}: [{values_str}]")
-    
-    def stop(self):
+
+    def stop_monitoring(self):
         """Stop monitoring"""
         self.running = False
-
-
-async def custom_data_handler(data: List[Dict[str, Any]]):
-    """Example custom data handler"""
-    print(f"\n📊 Custom Handler - Received {len(data)} register readings")
-    for item in data:
-        print(f"   {item['name']}: {item['values'][0]} (Address: {item['address']})")
-
-
-async def main():
-    """Example usage"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
-    config = ModbusConfig(
-        host='192.168.30.21',  # Change to your Modbus device IP
-        port=502,
-        device_id=1,
-        poll_interval=1,
-        timeout=5.0
-    )
-    
-    monitor = AsyncModbusMonitor(config)
-    
-    try:
-        if await monitor.connect():
-            print("Connected successfully! Reading Holding registers...")
-            
-            # Method 1: Use read_register function directly to read Holding registers
-            print("\n=== Method 1: Direct read_register calls ===")
-            holding_reg_config = RegisterConfig(
-                address=0,
-                count=10,
-                register_type='holding',
-                name='Holding_0-9'
-            )
-            
-            # Read holding register data multiple times
-            for i in range(3):
-                print(f"\n--- Direct Reading {i+1} ---")
-                
-                # Read holding registers using read_register function
-                holding_data = await monitor.read_register(holding_reg_config)
-                
-                if holding_data:
-                    print(f"Register Name: {holding_data['name']}")
-                    print(f"Address: {holding_data['address']}")
-                    print(f"Type: {holding_data['type']}")
-                    print(f"Values: {holding_data['values']}")
-                    print(f"Timestamp: {holding_data['timestamp']}")
-                else:
-                    print("Failed to read holding register data")
-                
-                # Wait before next reading
-                await asyncio.sleep(1)
-            
-            print("\n=== Method 2: Continuous monitoring with monitor_continuously ===")
-            
-            # Method 2: Use monitor_continuously function
-            # Add registers to monitor
-            monitor.add_register(address=0, count=10, register_type='holding', name='Holding_0-9')
-            monitor.add_register(address=10, count=5, register_type='holding', name='Holding_10-14')
-            
-            # Start continuous monitoring with custom data handler
-            print("Starting continuous monitoring... (Press Ctrl+C to stop)")
-            await monitor.monitor_continuously(data_callback=custom_data_handler)
-            
-    except KeyboardInterrupt:
-        print("\nStopping monitor...")
-        monitor.stop()
-    except Exception as e:
-        logging.error(f"Error in main: {e}")
-        monitor.stop()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
