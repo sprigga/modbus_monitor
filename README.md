@@ -147,8 +147,8 @@ Location: `async_modbus_monitor.py:37-298` (377 lines)
 | | `disconnect()` | 81-85 | Disconnect and clean up resources |
 | Read Ops | `read_register()` | 87-146 | Read a single register configuration |
 | | `read_all_registers()` | 148-160 | Concurrently read all configured registers |
-| Write Ops | `write_holding_register()` | 162-196 | Write a single holding register |
-| | `write_holding_registers()` | 198-234 | Write multiple holding registers |
+| Write Ops | `write_holding_register()` | 162-196 | Write a single holding register (FC06) |
+| | `write_holding_registers()` | 198-234 | Write multiple holding registers (FC16) |
 | Monitoring | `monitor_continuously()` | 236-286 | Continuous monitoring loop |
 | | `add_register()` | 47-56 | Add a register to the monitoring list |
 | Utility | `log_data()` | 288-294 | Data logging output |
@@ -183,6 +183,50 @@ Location: `backend/modbus_service.py:39-297` (297 lines)
 - **Non-blocking I/O**: All network operations use `async/await`.
 - **Concurrency**: `asyncio.gather()` executes multiple tasks concurrently.
 - **Performance Advantage**: A single thread can handle hundreds of concurrent connections.
+
+### Write Operations Support
+
+The system provides comprehensive write operations for Modbus holding registers:
+
+| Operation | Function | Purpose |
+|---|---|---|
+| Single Write | `write_holding_register()` | Write a single value to one register (Function Code 06) |
+| Multiple Write | `write_holding_registers()` | Write multiple values to consecutive registers (Function Code 16) |
+| Write Verification | Read-back after write | Verify written values match expected values |
+| Hex/Decimal Support | Value parsing | Support for both hexadecimal (0x prefix) and decimal values |
+
+#### Write Operation Implementation (`async_modbus_monitor.py:162-234`)
+```python
+async def write_holding_register(self, address: int, value: int) -> bool:
+    """
+    Write a single holding register (FC06)
+    Args:
+        address: Register address to write to
+        value: Value to write (0-65535 for single register)
+    Returns:
+        True if write successful, False otherwise
+    """
+    if not self.client or not self.client.connected:
+        self.logger.error("Not connected to Modbus device")
+        return False
+
+    try:
+        result = await self.client.write_register(
+            address=address,
+            value=value,
+            device_id=self.config.device_id
+        )
+
+        if not result.isError():
+            self.logger.info(f"Successfully wrote value {value} (0x{value:04X}) to address {address} (0x{address:04X})")
+            return True
+        else:
+            self.logger.error(f"Error writing to address {address}: {result}")
+            return False
+    except ModbusException as exc:
+        self.logger.error(f"Modbus exception writing to address {address}: {exc}")
+        return False
+```
 
 ### Error Handling and Fault Tolerance
 
@@ -266,6 +310,8 @@ data() {
 | Coils | FC01, FC05, FC15 | ✅ | ✅ | 1-bit | Digital output control |
 | Discrete Inputs | FC02 | ✅ | ❌ | 1-bit | Switch status, alarms |
 
+**Note**: Currently, write operations are fully implemented for Holding Registers. Coil write operations (FC05, FC15) are supported in the backend service but may require additional implementation in the frontend and CLI tools.
+
 #### Read Operation Implementation (`async_modbus_monitor.py:87-146`)
 ```python
 async def read_register(self, reg_config: RegisterConfig):
@@ -318,6 +364,17 @@ Confirm write? (y/n): y
 ✅ Write operation completed!
 Read back to verify? (y/n): y
 ```
+
+**Command-Line Arguments**:
+
+| Argument | Description |
+|---|---|
+| `--write` | Enable command-line write mode (requires `--address` and `--values`) |
+| `--write-interactive` | Enable interactive write mode |
+| `--address ADDRESS` | Register address to write to (decimal) |
+| `--values VALUES` | Comma-separated values to write (supports hex with 0x prefix) |
+| `--monitor` | Continue monitoring after write operation |
+| `--no-monitor` | Exit after write operation (default behavior when write is completed) |
 
 #### B. REST API Mode
 
@@ -374,10 +431,12 @@ curl http://localhost:8000/api/data/latest
 1.  **Configuration Panel**: Dynamically modify Modbus connection parameters.
 2.  **Connection Control**: Connect/Disconnect/Start Monitoring/Stop buttons.
 3.  **Manual Read**: Read by specifying address, count, and register type.
-4.  **Write Operations**: Write single or multiple registers.
-5.  **Data Display**: Real-time data shown in a table.
-6.  **Auto-Refresh**: Toggle automatic data updates.
-7.  **Status Indicators**: Visual indicators for connection and monitoring status.
+4.  **Write Operations**: Write single or multiple registers to holding registers with immediate feedback.
+5.  **Write Single Register**: Specify address and value to write a single 16-bit register.
+6.  **Write Multiple Registers**: Write multiple consecutive registers using comma-separated values.
+7.  **Data Display**: Real-time data shown in a table with timestamp and value verification.
+8.  **Auto-Refresh**: Toggle automatic data updates.
+9.  **Status Indicators**: Visual indicators for connection and monitoring status.
 
 ### 3. Flexible Configuration Management
 
@@ -412,13 +471,53 @@ MODBUS_POLL_INTERVAL=2.0
 MODBUS_TIMEOUT=3.0
 MODBUS_RETRIES=3
 
-# Register range configuration
+# Register range configuration (for monitoring)
 START_ADDRESS=1
 END_ADDRESS=26
 
 # Log level
 LOG_LEVEL=INFO
 ```
+
+#### config.conf File Format (Alternative Configuration)
+```ini
+[modbus]
+# Modbus TCP Connection Configuration
+host = 192.168.30.24
+port = 502
+device_id = 1
+
+[polling]
+# Polling and Timeout Settings
+poll_interval = 2.0
+timeout = 3.0
+retries = 3
+
+[registers]
+# Register Range Configuration
+start_address = 1
+end_address = 26
+
+[logging]
+# Logging Level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+level = INFO
+
+# Optional: Additional Register Ranges
+# Uncomment and configure as needed
+# [input_registers]
+# start = 100
+# count = 8
+
+# [coils]
+# start = 0
+# count = 16
+
+# [discrete_inputs]
+# start = 100
+# count = 8
+```
+
+The configuration system supports both `.env` and `.conf` files with priority given to `.env` if both exist.
 
 ## 📦 Dependency Analysis
 
